@@ -94,6 +94,14 @@ var cue = {
 };
 
 // ------------------------------------------
+// GAME MODE
+// 1 = Standard formation
+// 2 = Random clusters
+// 3 = Practice mode
+// ------------------------------------------
+var currentMode = 1;
+
+// ------------------------------------------
 // TABLE COLOURS
 // ------------------------------------------
 var TABLE_CLOTH = '#0B6623';    // baize green
@@ -183,24 +191,42 @@ function initBallSpots() {
 
 
 function createBalls() {
-    // Options for ball physics
+    // Create cue ball
+    createCueBall();
+    
+    // Create coloured balls at their spots
+    createColouredBalls();
+    
+    // Create red balls based on current mode
+    createRedBallsByMode(currentMode);
+}
+
+
+function createCueBall() {
     var ballOptions = {
         friction: 0.02,
         restitution: 0.9,
         frictionAir: 0.015,
-        label: 'ball'
+        label: 'cueBall'
     };
     
-    // Create cue ball
     cueBall = Bodies.circle(
         spotPositions.cueBall.x,
         spotPositions.cueBall.y,
         ballRadius,
-        { ...ballOptions, label: 'cueBall' }
+        ballOptions
     );
     World.add(world, cueBall);
+}
+
+
+function createColouredBalls() {
+    var ballOptions = {
+        friction: 0.02,
+        restitution: 0.9,
+        frictionAir: 0.015
+    };
     
-    // Create coloured balls at their spots
     for (var colour in colouredBalls) {
         var pos = spotPositions[colour];
         colouredBalls[colour] = Bodies.circle(
@@ -211,9 +237,32 @@ function createBalls() {
         );
         World.add(world, colouredBalls[colour]);
     }
+}
+
+
+function createRedBallsByMode(mode) {
+    // Clear existing red balls first
+    clearRedBalls();
     
-    // Create 15 red balls in triangle formation
-    createRedTriangle();
+    if (mode === 1) {
+        // Mode 1: Standard triangle formation
+        createRedTriangle();
+    } else if (mode === 2) {
+        // Mode 2: Random clusters
+        createRedClusters();
+    } else if (mode === 3) {
+        // Mode 3: Practice mode - spread across table
+        createPracticeReds();
+    }
+}
+
+
+function clearRedBalls() {
+    // Remove all red balls from physics world
+    for (var i = 0; i < redBalls.length; i++) {
+        World.remove(world, redBalls[i]);
+    }
+    redBalls = [];
 }
 
 
@@ -254,6 +303,170 @@ function createRedTriangle() {
             if (ballCount >= 15) break;
         }
         if (ballCount >= 15) break;
+    }
+}
+
+
+function createRedClusters() {
+    // Mode 2: Create red balls in random clusters
+    // We'll make 3 clusters with 5 balls each
+    
+    var ballOptions = {
+        friction: 0.02,
+        restitution: 0.9,
+        frictionAir: 0.015,
+        label: 'red'
+    };
+    
+    var innerLeft = tableX + cushionThickness + pocketSize;
+    var innerRight = tableX + tableLength - cushionThickness - pocketSize;
+    var innerTop = tableY + cushionThickness + pocketSize;
+    var innerBottom = tableY + tableWidth - cushionThickness - pocketSize;
+    
+    // Define 3 cluster center positions (avoiding ball spots)
+    var numClusters = 3;
+    var ballsPerCluster = 5;
+    
+    for (var cluster = 0; cluster < numClusters; cluster++) {
+        // Random center for this cluster
+        var clusterX = random(innerLeft + 50, innerRight - 50);
+        var clusterY = random(innerTop + 30, innerBottom - 30);
+        
+        // Place balls around this center point
+        for (var b = 0; b < ballsPerCluster; b++) {
+            // Random offset from cluster center
+            var offsetX = random(-ballDiameter * 2, ballDiameter * 2);
+            var offsetY = random(-ballDiameter * 2, ballDiameter * 2);
+            
+            var ballX = clusterX + offsetX;
+            var ballY = clusterY + offsetY;
+            
+            // Keep within bounds
+            ballX = constrain(ballX, innerLeft, innerRight);
+            ballY = constrain(ballY, innerTop, innerBottom);
+            
+            var redBall = Bodies.circle(ballX, ballY, ballRadius, ballOptions);
+            redBalls.push(redBall);
+            World.add(world, redBall);
+        }
+    }
+}
+
+
+function createPracticeReds() {
+    // Mode 3: Practice mode - spread reds across the table
+    // Useful for practicing different shot angles
+    
+    var ballOptions = {
+        friction: 0.02,
+        restitution: 0.9,
+        frictionAir: 0.015,
+        label: 'red'
+    };
+    
+    var innerLeft = tableX + cushionThickness + ballDiameter;
+    var innerRight = tableX + tableLength - cushionThickness - ballDiameter;
+    var innerTop = tableY + cushionThickness + ballDiameter;
+    var innerBottom = tableY + tableWidth - cushionThickness - ballDiameter;
+    
+    // Create a grid-like spread with some randomness
+    var cols = 5;
+    var rows = 3;
+    var spacingX = (innerRight - innerLeft) / (cols + 1);
+    var spacingY = (innerBottom - innerTop) / (rows + 1);
+    
+    var ballCount = 0;
+    
+    for (var row = 0; row < rows; row++) {
+        for (var col = 0; col < cols; col++) {
+            if (ballCount >= 15) break;
+            
+            // Base position on grid
+            var baseX = innerLeft + spacingX * (col + 1);
+            var baseY = innerTop + spacingY * (row + 1);
+            
+            // Add random offset for natural look
+            var offsetX = random(-ballDiameter, ballDiameter);
+            var offsetY = random(-ballDiameter, ballDiameter);
+            
+            var ballX = baseX + offsetX;
+            var ballY = baseY + offsetY;
+            
+            // Check not too close to coloured ball spots
+            if (!isTooCloseToSpot(ballX, ballY)) {
+                var redBall = Bodies.circle(ballX, ballY, ballRadius, ballOptions);
+                redBalls.push(redBall);
+                World.add(world, redBall);
+                ballCount++;
+            }
+        }
+        if (ballCount >= 15) break;
+    }
+    
+    // Fill remaining balls if we skipped some spots
+    while (redBalls.length < 15) {
+        var randX = random(innerLeft, innerRight);
+        var randY = random(innerTop, innerBottom);
+        
+        if (!isTooCloseToSpot(randX, randY)) {
+            var redBall = Bodies.circle(randX, randY, ballRadius, ballOptions);
+            redBalls.push(redBall);
+            World.add(world, redBall);
+        }
+    }
+}
+
+
+function isTooCloseToSpot(x, y) {
+    // Check if position is too close to any coloured ball spot
+    var minDistance = ballDiameter * 2;
+    
+    for (var colour in spotPositions) {
+        if (colour === 'cueBall') continue;
+        
+        var spot = spotPositions[colour];
+        var dist = sqrt(pow(x - spot.x, 2) + pow(y - spot.y, 2));
+        
+        if (dist < minDistance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+function resetAllBalls() {
+    // Remove all balls from world
+    clearRedBalls();
+    
+    if (cueBall) {
+        World.remove(world, cueBall);
+    }
+    
+    for (var colour in colouredBalls) {
+        if (colouredBalls[colour]) {
+            World.remove(world, colouredBalls[colour]);
+        }
+    }
+    
+    // Recreate all balls
+    createCueBall();
+    createColouredBalls();
+    createRedBallsByMode(currentMode);
+}
+
+
+function keyPressed() {
+    // Mode switching with number keys
+    if (key === '1') {
+        currentMode = 1;
+        resetAllBalls();
+    } else if (key === '2') {
+        currentMode = 2;
+        resetAllBalls();
+    } else if (key === '3') {
+        currentMode = 3;
+        resetAllBalls();
     }
 }
 
@@ -346,6 +559,36 @@ function draw() {
     
     // Draw all balls
     drawBalls();
+    
+    // Draw mode indicator
+    drawModeIndicator();
+}
+
+
+function drawModeIndicator() {
+    // Show current mode in corner
+    push();
+    fill('#FFFFFF');
+    noStroke();
+    textSize(14);
+    textAlign(LEFT, TOP);
+    
+    var modeText = "Mode " + currentMode + ": ";
+    if (currentMode === 1) {
+        modeText += "Standard Formation";
+    } else if (currentMode === 2) {
+        modeText += "Random Clusters";
+    } else if (currentMode === 3) {
+        modeText += "Practice Mode";
+    }
+    
+    text(modeText, 15, 15);
+    
+    // Instructions
+    fill('#AAAAAA');
+    textSize(11);
+    text("Press 1, 2, or 3 to change mode", 15, 35);
+    pop();
 }
 
 
