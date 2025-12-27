@@ -86,20 +86,59 @@ var BALL_COLORS = {
 // CUE STICK
 // ------------------------------------------
 var cue = {
-    x: 0,
-    y: 0,
     angle: 0,
-    length: 250,
-    visible: false
+    length: 280,
+    pullBack: 0,         // how far pulled back (power)
+    maxPullBack: 120,    // maximum pull distance
+    isAiming: false,     // currently aiming
+    tipOffset: 10,       // gap between cue tip and ball
+    dragStartX: 0,       // where mouse was pressed
+    dragStartY: 0
 };
 
 // ------------------------------------------
-// GAME MODE
-// 1 = Standard formation
-// 2 = Random clusters
-// 3 = Practice mode
+// GAME STATE
 // ------------------------------------------
 var currentMode = 1;
+var cueBallPlaced = false;     // has cue ball been placed?
+var isShooting = false;        // is a shot in progress?
+var canShoot = true;           // can player take a shot?
+
+// ------------------------------------------
+// PHYSICS CONSTANTS
+// Tuned for realistic snooker ball behavior
+// ------------------------------------------
+var BALL_FRICTION = 0.01;           // surface friction
+var BALL_RESTITUTION = 0.95;        // ball-to-ball bounce (high for snooker balls)
+var BALL_FRICTION_AIR = 0.018;      // air/cloth resistance (slows balls down)
+var BALL_FRICTION_STATIC = 0.05;    // static friction
+var BALL_DENSITY = 0.025;           // ball mass
+
+var CUSHION_RESTITUTION = 0.75;     // cushion bounce (lower than ball-to-ball)
+var CUSHION_FRICTION = 0.03;        // cushion surface friction
+
+// ------------------------------------------
+// ANIMATION EFFECTS
+// ------------------------------------------
+
+// Ball trail effect - stores recent positions for each ball
+var ballTrails = {};          // key: ball id, value: array of {x, y, age}
+var TRAIL_LENGTH = 12;        // number of trail segments
+var TRAIL_FADE_RATE = 0.08;   // how fast trail fades
+
+// Cue impact effect
+var impactEffect = {
+    active: false,
+    x: 0,
+    y: 0,
+    time: 0,
+    maxTime: 25,          // frames the effect lasts
+    rings: []             // emanating circles
+};
+
+// Pocket entry animations
+var pocketAnimations = [];    // active pocket entry effects
+var pocketPositions = [];     // will be initialized in setup
 
 // ------------------------------------------
 // TABLE COLOURS
@@ -125,6 +164,9 @@ function setup() {
     // Calculate all measurements
     initTableMeasurements();
     
+    // Initialize pocket positions for animations
+    initPocketPositions();
+    
     // Initialize ball spots
     initBallSpots();
     
@@ -133,6 +175,23 @@ function setup() {
     
     // Create table boundaries (cushions as physics bodies)
     createCushionBodies();
+}
+
+
+function initPocketPositions() {
+    // Define pocket center positions for collision detection
+    var offset = pocketSize * 0.35;
+    
+    pocketPositions = [
+        // Corner pockets
+        { x: tableX + offset, y: tableY + offset },
+        { x: tableX + tableLength - offset, y: tableY + offset },
+        { x: tableX + offset, y: tableY + tableWidth - offset },
+        { x: tableX + tableLength - offset, y: tableY + tableWidth - offset },
+        // Middle pockets
+        { x: tableX + tableLength / 2, y: tableY },
+        { x: tableX + tableLength / 2, y: tableY + tableWidth }
+    ];
 }
 
 
@@ -191,8 +250,9 @@ function initBallSpots() {
 
 
 function createBalls() {
-    // Create cue ball
-    createCueBall();
+    // Cue ball is NOT created here - player must place it
+    cueBallPlaced = false;
+    cueBall = null;
     
     // Create coloured balls at their spots
     createColouredBalls();
@@ -202,38 +262,40 @@ function createBalls() {
 }
 
 
-function createCueBall() {
-    var ballOptions = {
-        friction: 0.02,
-        restitution: 0.9,
-        frictionAir: 0.015,
-        label: 'cueBall'
+function getBallOptions(label) {
+    // Standard physics options for all balls
+    return {
+        friction: BALL_FRICTION,
+        restitution: BALL_RESTITUTION,
+        frictionAir: BALL_FRICTION_AIR,
+        frictionStatic: BALL_FRICTION_STATIC,
+        density: BALL_DENSITY,
+        label: label
     };
-    
+}
+
+
+function createCueBall(posX, posY) {
+    // Create cue ball at specified position
     cueBall = Bodies.circle(
-        spotPositions.cueBall.x,
-        spotPositions.cueBall.y,
+        posX,
+        posY,
         ballRadius,
-        ballOptions
+        getBallOptions('cueBall')
     );
     World.add(world, cueBall);
+    cueBallPlaced = true;
 }
 
 
 function createColouredBalls() {
-    var ballOptions = {
-        friction: 0.02,
-        restitution: 0.9,
-        frictionAir: 0.015
-    };
-    
     for (var colour in colouredBalls) {
         var pos = spotPositions[colour];
         colouredBalls[colour] = Bodies.circle(
             pos.x,
             pos.y,
             ballRadius,
-            { ...ballOptions, label: colour }
+            getBallOptions(colour)
         );
         World.add(world, colouredBalls[colour]);
     }
@@ -272,13 +334,6 @@ function createRedTriangle() {
     var startX = pinkPos.x;
     var startY = pinkPos.y - ballDiameter * 1.5;  // behind pink
     
-    var ballOptions = {
-        friction: 0.02,
-        restitution: 0.9,
-        frictionAir: 0.015,
-        label: 'red'
-    };
-    
     // Triangle has 5 rows: 1, 2, 3, 4, 5 balls
     var rows = 5;
     var ballCount = 0;
@@ -294,7 +349,7 @@ function createRedTriangle() {
                 ballX,
                 rowY,
                 ballRadius,
-                ballOptions
+                getBallOptions('red')
             );
             redBalls.push(redBall);
             World.add(world, redBall);
@@ -310,13 +365,6 @@ function createRedTriangle() {
 function createRedClusters() {
     // Mode 2: Create red balls in random clusters
     // We'll make 3 clusters with 5 balls each
-    
-    var ballOptions = {
-        friction: 0.02,
-        restitution: 0.9,
-        frictionAir: 0.015,
-        label: 'red'
-    };
     
     var innerLeft = tableX + cushionThickness + pocketSize;
     var innerRight = tableX + tableLength - cushionThickness - pocketSize;
@@ -345,7 +393,7 @@ function createRedClusters() {
             ballX = constrain(ballX, innerLeft, innerRight);
             ballY = constrain(ballY, innerTop, innerBottom);
             
-            var redBall = Bodies.circle(ballX, ballY, ballRadius, ballOptions);
+            var redBall = Bodies.circle(ballX, ballY, ballRadius, getBallOptions('red'));
             redBalls.push(redBall);
             World.add(world, redBall);
         }
@@ -356,13 +404,6 @@ function createRedClusters() {
 function createPracticeReds() {
     // Mode 3: Practice mode - spread reds across the table
     // Useful for practicing different shot angles
-    
-    var ballOptions = {
-        friction: 0.02,
-        restitution: 0.9,
-        frictionAir: 0.015,
-        label: 'red'
-    };
     
     var innerLeft = tableX + cushionThickness + ballDiameter;
     var innerRight = tableX + tableLength - cushionThickness - ballDiameter;
@@ -394,7 +435,7 @@ function createPracticeReds() {
             
             // Check not too close to coloured ball spots
             if (!isTooCloseToSpot(ballX, ballY)) {
-                var redBall = Bodies.circle(ballX, ballY, ballRadius, ballOptions);
+                var redBall = Bodies.circle(ballX, ballY, ballRadius, getBallOptions('red'));
                 redBalls.push(redBall);
                 World.add(world, redBall);
                 ballCount++;
@@ -409,7 +450,7 @@ function createPracticeReds() {
         var randY = random(innerTop, innerBottom);
         
         if (!isTooCloseToSpot(randX, randY)) {
-            var redBall = Bodies.circle(randX, randY, ballRadius, ballOptions);
+            var redBall = Bodies.circle(randX, randY, ballRadius, getBallOptions('red'));
             redBalls.push(redBall);
             World.add(world, redBall);
         }
@@ -441,6 +482,7 @@ function resetAllBalls() {
     
     if (cueBall) {
         World.remove(world, cueBall);
+        cueBall = null;
     }
     
     for (var colour in colouredBalls) {
@@ -449,8 +491,12 @@ function resetAllBalls() {
         }
     }
     
-    // Recreate all balls
-    createCueBall();
+    // Reset game state
+    cueBallPlaced = false;
+    cue.isAiming = false;
+    cue.pullBack = 0;
+    
+    // Recreate coloured and red balls (cue ball placed by user)
     createColouredBalls();
     createRedBallsByMode(currentMode);
 }
@@ -468,14 +514,130 @@ function keyPressed() {
         currentMode = 3;
         resetAllBalls();
     }
+    
+    // R key to reset cue ball position (place again)
+    if (key === 'r' || key === 'R') {
+        if (cueBall && !isShooting) {
+            World.remove(world, cueBall);
+            cueBall = null;
+            cueBallPlaced = false;
+            cue.isAiming = false;
+            cue.pullBack = 0;
+        }
+    }
+}
+
+
+function mousePressed() {
+    // Check if placing cue ball
+    if (!cueBallPlaced) {
+        if (isInDZone(mouseX, mouseY)) {
+            // Check not overlapping other balls
+            if (!isOverlappingBall(mouseX, mouseY)) {
+                createCueBall(mouseX, mouseY);
+            }
+        }
+        return;
+    }
+    
+    // Start aiming if cue ball is placed and can shoot
+    if (cueBallPlaced && canShoot && cueBall) {
+        // Lock the aim angle at click time
+        var dx = mouseX - cueBall.position.x;
+        var dy = mouseY - cueBall.position.y;
+        cue.angle = atan2(dy, dx);
+        
+        // Record drag start position for power calculation
+        cue.dragStartX = mouseX;
+        cue.dragStartY = mouseY;
+        
+        cue.isAiming = true;
+        cue.pullBack = 0;
+    }
+}
+
+
+function mouseDragged() {
+    // Adjust power while aiming (angle is locked)
+    if (cue.isAiming && cueBall) {
+        // Calculate distance from the initial click point
+        var dx = mouseX - cue.dragStartX;
+        var dy = mouseY - cue.dragStartY;
+        var dragDistance = sqrt(dx * dx + dy * dy);
+        
+        // Sensitivity adjustment with SHIFT key
+        var sensitivity = keyIsDown(SHIFT) ? 0.25 : 0.8;
+        
+        // Power increases with drag distance
+        cue.pullBack = min(cue.maxPullBack, dragDistance * sensitivity);
+    }
+}
+
+
+function mouseReleased() {
+    // Take the shot
+    if (cue.isAiming && cueBall && cue.pullBack > 5) {
+        shootCueBall();
+    }
+    
+    cue.isAiming = false;
+    cue.pullBack = 0;
+}
+
+
+function shootCueBall() {
+    // Calculate shot power and direction
+    var power = map(cue.pullBack, 0, cue.maxPullBack, 0, 0.035);
+    var powerNormalized = cue.pullBack / cue.maxPullBack;
+    
+    // Direction is toward the mouse (opposite of cue)
+    var forceX = cos(cue.angle) * power;
+    var forceY = sin(cue.angle) * power;
+    
+    // Trigger impact effect at cue ball position
+    triggerImpactEffect(cueBall.position.x, cueBall.position.y, powerNormalized);
+    
+    // Apply force to cue ball
+    Body.applyForce(cueBall, cueBall.position, { x: forceX, y: forceY });
+    
+    // Update game state
+    isShooting = true;
+    canShoot = false;
+}
+
+
+function isOverlappingBall(x, y) {
+    // Check if position overlaps with any existing ball
+    var checkRadius = ballDiameter;  // minimum distance
+    
+    // Check coloured balls
+    for (var colour in colouredBalls) {
+        var ball = colouredBalls[colour];
+        var dist = sqrt(pow(x - ball.position.x, 2) + pow(y - ball.position.y, 2));
+        if (dist < checkRadius) {
+            return true;
+        }
+    }
+    
+    // Check red balls
+    for (var i = 0; i < redBalls.length; i++) {
+        var dist = sqrt(pow(x - redBalls[i].position.x, 2) + pow(y - redBalls[i].position.y, 2));
+        if (dist < checkRadius) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 
 function createCushionBodies() {
     // Create static bodies for cushions (collision boundaries)
+    // Cushions have different restitution than ball-to-ball collisions
     var cushionOptions = {
         isStatic: true,
-        restitution: 0.8,
+        restitution: CUSHION_RESTITUTION,
+        friction: CUSHION_FRICTION,
         label: 'cushion'
     };
     
@@ -554,14 +716,245 @@ function draw() {
     // Update physics
     Engine.update(engine);
     
+    // Update animations
+    updateBallTrails();
+    updateImpactEffect();
+    updatePocketAnimations();
+    
+    // Check for balls entering pockets
+    checkPocketCollisions();
+    
+    // Check if balls have stopped moving
+    checkBallsMoving();
+    
     // Draw the table
     drawTable();
+    
+    // Draw ball trails (behind balls)
+    drawBallTrails();
+    
+    // Draw cue ball placement guide if not placed
+    if (!cueBallPlaced) {
+        drawCueBallPlacementGuide();
+    }
     
     // Draw all balls
     drawBalls();
     
-    // Draw mode indicator
+    // Draw impact effect (on top of balls)
+    drawImpactEffect();
+    
+    // Draw pocket entry animations
+    drawPocketAnimations();
+    
+    // Draw the cue stick
+    if (cueBallPlaced && canShoot) {
+        drawCue();
+    }
+    
+    // Draw mode indicator and instructions
     drawModeIndicator();
+    drawInstructions();
+}
+
+
+function checkBallsMoving() {
+    // Check if any balls are still moving
+    var threshold = 0.15;  // velocity threshold for "stopped"
+    var anyMoving = false;
+    
+    // Check cue ball
+    if (cueBall) {
+        var speed = Matter.Vector.magnitude(cueBall.velocity);
+        if (speed > threshold) {
+            anyMoving = true;
+        }
+    }
+    
+    // Check red balls
+    for (var i = 0; i < redBalls.length; i++) {
+        var speed = Matter.Vector.magnitude(redBalls[i].velocity);
+        if (speed > threshold) {
+            anyMoving = true;
+            break;
+        }
+    }
+    
+    // Check coloured balls
+    if (!anyMoving) {
+        for (var colour in colouredBalls) {
+            var speed = Matter.Vector.magnitude(colouredBalls[colour].velocity);
+            if (speed > threshold) {
+                anyMoving = true;
+                break;
+            }
+        }
+    }
+    
+    // Update shooting state
+    if (isShooting && !anyMoving) {
+        isShooting = false;
+        canShoot = true;
+    }
+}
+
+
+function drawCueBallPlacementGuide() {
+    // Highlight the D zone where cue ball can be placed
+    push();
+    
+    var innerBottom = tableY + tableWidth - cushionThickness;
+    var playHeight = tableWidth - cushionThickness * 2;
+    var baulkY = innerBottom - (playHeight * 0.2);
+    var centerX = tableX + tableLength / 2;
+    
+    // Check if mouse is in valid D zone
+    var inDZone = isInDZone(mouseX, mouseY);
+    
+    // Highlight D area
+    noFill();
+    stroke(inDZone ? '#00FF00' : '#FFFF00');
+    strokeWeight(3);
+    arc(centerX, baulkY, dRadius * 2, dRadius * 2, -HALF_PI, HALF_PI);
+    
+    // Draw ghost ball at mouse position if in D zone
+    if (inDZone) {
+        fill(255, 255, 255, 100);
+        noStroke();
+        ellipse(mouseX, mouseY, ballDiameter);
+    }
+    
+    pop();
+}
+
+
+function isInDZone(x, y) {
+    // Check if a point is inside the D zone (semicircle)
+    var innerLeft = tableX + cushionThickness;
+    var innerRight = tableX + tableLength - cushionThickness;
+    var innerBottom = tableY + tableWidth - cushionThickness;
+    var playHeight = tableWidth - cushionThickness * 2;
+    var baulkY = innerBottom - (playHeight * 0.2);
+    var centerX = tableX + tableLength / 2;
+    
+    // Must be below baulk line (in the baulk area)
+    if (y < baulkY) return false;
+    if (y > innerBottom) return false;
+    
+    // Must be within the D semicircle or on the baulk line within D width
+    var distFromCenter = sqrt(pow(x - centerX, 2) + pow(y - baulkY, 2));
+    
+    // Check if within D semicircle
+    if (distFromCenter <= dRadius) {
+        // Also check within table bounds
+        if (x >= innerLeft && x <= innerRight) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+
+function drawCue() {
+    // Only draw cue when not shooting and cue ball exists
+    if (!cueBall || isShooting) return;
+    
+    push();
+    
+    // Only update aim angle when NOT pulling back (free aiming)
+    if (!cue.isAiming) {
+        var dx = mouseX - cueBall.position.x;
+        var dy = mouseY - cueBall.position.y;
+        cue.angle = atan2(dy, dx);
+    }
+    
+    // Cue position (opposite side from mouse)
+    var cueStartX = cueBall.position.x - cos(cue.angle) * (ballRadius + cue.tipOffset + cue.pullBack);
+    var cueStartY = cueBall.position.y - sin(cue.angle) * (ballRadius + cue.tipOffset + cue.pullBack);
+    var cueEndX = cueStartX - cos(cue.angle) * cue.length;
+    var cueEndY = cueStartY - sin(cue.angle) * cue.length;
+    
+    // Draw aiming line (dotted)
+    if (cue.isAiming) {
+        stroke(255, 255, 255, 60);
+        strokeWeight(1);
+        drawingContext.setLineDash([5, 5]);
+        line(cueBall.position.x, cueBall.position.y,
+             cueBall.position.x + cos(cue.angle) * 300,
+             cueBall.position.y + sin(cue.angle) * 300);
+        drawingContext.setLineDash([]);
+    }
+    
+    // Draw power indicator when pulling back
+    if (cue.pullBack > 0) {
+        var powerPercent = cue.pullBack / cue.maxPullBack;
+        drawPowerIndicator(powerPercent);
+    }
+    
+    // Cue shadow
+    stroke(0, 0, 0, 50);
+    strokeWeight(12);
+    line(cueStartX + 4, cueStartY + 4, cueEndX + 4, cueEndY + 4);
+    
+    // Main cue body (tapered look)
+    // Butt end (thicker, darker wood)
+    stroke('#3E2723');
+    strokeWeight(10);
+    var midX = cueStartX - cos(cue.angle) * (cue.length * 0.6);
+    var midY = cueStartY - sin(cue.angle) * (cue.length * 0.6);
+    line(midX, midY, cueEndX, cueEndY);
+    
+    // Shaft (lighter wood, thinner)
+    stroke('#D7CCC8');
+    strokeWeight(7);
+    line(cueStartX, cueStartY, midX, midY);
+    
+    // Ferrule (white band near tip)
+    stroke('#FFFFFF');
+    strokeWeight(6);
+    var ferruleX = cueStartX - cos(cue.angle) * 8;
+    var ferruleY = cueStartY - sin(cue.angle) * 8;
+    line(cueStartX, cueStartY, ferruleX, ferruleY);
+    
+    // Tip (blue chalk)
+    stroke('#1565C0');
+    strokeWeight(5);
+    line(cueStartX, cueStartY, 
+         cueStartX - cos(cue.angle) * 3, 
+         cueStartY - sin(cue.angle) * 3);
+    
+    pop();
+}
+
+
+function drawPowerIndicator(powerPercent) {
+    // Power bar near the cue ball
+    push();
+    
+    var barWidth = 80;
+    var barHeight = 10;
+    var barX = cueBall.position.x - barWidth / 2;
+    var barY = cueBall.position.y - 40;
+    
+    // Background
+    fill(50, 50, 50, 180);
+    noStroke();
+    rect(barX, barY, barWidth, barHeight, 3);
+    
+    // Power fill (green to red gradient effect)
+    var r = map(powerPercent, 0, 1, 100, 255);
+    var g = map(powerPercent, 0, 1, 200, 50);
+    fill(r, g, 50);
+    rect(barX, barY, barWidth * powerPercent, barHeight, 3);
+    
+    // Border
+    noFill();
+    stroke(255);
+    strokeWeight(1);
+    rect(barX, barY, barWidth, barHeight, 3);
+    
+    pop();
 }
 
 
@@ -583,11 +976,33 @@ function drawModeIndicator() {
     }
     
     text(modeText, 15, 15);
-    
-    // Instructions
+    pop();
+}
+
+
+function drawInstructions() {
+    push();
     fill('#AAAAAA');
+    noStroke();
     textSize(11);
-    text("Press 1, 2, or 3 to change mode", 15, 35);
+    textAlign(LEFT, TOP);
+    
+    var yPos = 35;
+    text("Press 1, 2, or 3 to change mode | R to re-place cue ball", 15, yPos);
+    yPos += 16;
+    
+    if (!cueBallPlaced) {
+        fill('#FFFF00');
+        text("Click in the D zone to place cue ball", 15, yPos);
+    } else if (canShoot) {
+        text("Move mouse to aim, then click + drag for power", 15, yPos);
+        yPos += 16;
+        fill('#AAAAAA');
+        text("Hold SHIFT while dragging for fine power control", 15, yPos);
+    } else {
+        text("Wait for balls to stop...", 15, yPos);
+    }
+    
     pop();
 }
 
@@ -748,8 +1163,10 @@ function drawBallSpots() {
 
 
 function drawBalls() {
-    // Draw cue ball
-    drawSingleBall(cueBall.position.x, cueBall.position.y, BALL_COLORS.cue);
+    // Draw cue ball (if placed)
+    if (cueBall) {
+        drawSingleBall(cueBall.position.x, cueBall.position.y, BALL_COLORS.cue);
+    }
     
     // Draw red balls
     for (var i = 0; i < redBalls.length; i++) {
@@ -777,5 +1194,358 @@ function drawSingleBall(x, y, ballColor) {
     // Highlight for 3D effect
     fill(255, 255, 255, 80);
     ellipse(x - ballRadius * 0.3, y - ballRadius * 0.3, ballDiameter * 0.35);
+}
+
+
+// ============================================
+// ANIMATION EFFECTS
+// ============================================
+
+// ------------------------------------------
+// BALL TRAIL EFFECT
+// ------------------------------------------
+
+function updateBallTrails() {
+    // Update trail for cue ball
+    if (cueBall) {
+        updateSingleBallTrail(cueBall.id, cueBall.position, cueBall.velocity, BALL_COLORS.cue);
+    }
+    
+    // Update trails for red balls
+    for (var i = 0; i < redBalls.length; i++) {
+        var ball = redBalls[i];
+        updateSingleBallTrail(ball.id, ball.position, ball.velocity, BALL_COLORS.red);
+    }
+    
+    // Update trails for coloured balls
+    for (var colour in colouredBalls) {
+        var ball = colouredBalls[colour];
+        if (ball) {
+            updateSingleBallTrail(ball.id, ball.position, ball.velocity, BALL_COLORS[colour]);
+        }
+    }
+}
+
+
+function updateSingleBallTrail(ballId, position, velocity, ballColor) {
+    // Only add trail points if ball is moving
+    var speed = Matter.Vector.magnitude(velocity);
+    
+    if (!ballTrails[ballId]) {
+        ballTrails[ballId] = [];
+    }
+    
+    var trail = ballTrails[ballId];
+    
+    // Add new point if moving fast enough
+    if (speed > 0.5) {
+        trail.unshift({
+            x: position.x,
+            y: position.y,
+            age: 0,
+            color: ballColor,
+            speed: speed
+        });
+    }
+    
+    // Update ages and remove old points
+    for (var i = trail.length - 1; i >= 0; i--) {
+        trail[i].age += TRAIL_FADE_RATE;
+        if (trail[i].age >= 1) {
+            trail.splice(i, 1);
+        }
+    }
+    
+    // Limit trail length
+    while (trail.length > TRAIL_LENGTH) {
+        trail.pop();
+    }
+}
+
+
+function drawBallTrails() {
+    push();
+    noStroke();
+    
+    for (var ballId in ballTrails) {
+        var trail = ballTrails[ballId];
+        
+        for (var i = 0; i < trail.length; i++) {
+            var point = trail[i];
+            var alpha = map(point.age, 0, 1, 150, 0);
+            var size = map(point.age, 0, 1, ballDiameter * 0.8, ballDiameter * 0.2);
+            
+            // Parse color and apply alpha
+            var c = color(point.color);
+            c.setAlpha(alpha);
+            fill(c);
+            
+            ellipse(point.x, point.y, size);
+        }
+    }
+    
+    pop();
+}
+
+
+// ------------------------------------------
+// CUE IMPACT EFFECT
+// ------------------------------------------
+
+function triggerImpactEffect(x, y, power) {
+    impactEffect.active = true;
+    impactEffect.x = x;
+    impactEffect.y = y;
+    impactEffect.time = 0;
+    impactEffect.rings = [];
+    
+    // Create multiple rings based on power
+    var numRings = floor(map(power, 0, 1, 2, 5));
+    for (var i = 0; i < numRings; i++) {
+        impactEffect.rings.push({
+            radius: ballRadius,
+            maxRadius: ballRadius * (3 + i * 2),
+            alpha: 255,
+            delay: i * 3  // stagger the rings
+        });
+    }
+}
+
+
+function updateImpactEffect() {
+    if (!impactEffect.active) return;
+    
+    impactEffect.time++;
+    
+    // Update each ring
+    var allDone = true;
+    for (var i = 0; i < impactEffect.rings.length; i++) {
+        var ring = impactEffect.rings[i];
+        
+        if (ring.delay > 0) {
+            ring.delay--;
+            allDone = false;
+        } else {
+            // Expand ring
+            ring.radius += (ring.maxRadius - ring.radius) * 0.15;
+            ring.alpha *= 0.88;
+            
+            if (ring.alpha > 5) {
+                allDone = false;
+            }
+        }
+    }
+    
+    if (allDone || impactEffect.time > impactEffect.maxTime) {
+        impactEffect.active = false;
+    }
+}
+
+
+function drawImpactEffect() {
+    if (!impactEffect.active) return;
+    
+    push();
+    noFill();
+    
+    for (var i = 0; i < impactEffect.rings.length; i++) {
+        var ring = impactEffect.rings[i];
+        
+        if (ring.delay <= 0 && ring.alpha > 5) {
+            // Draw expanding ring
+            stroke(255, 255, 255, ring.alpha);
+            strokeWeight(2);
+            ellipse(impactEffect.x, impactEffect.y, ring.radius * 2);
+            
+            // Inner glow
+            stroke(200, 220, 255, ring.alpha * 0.5);
+            strokeWeight(4);
+            ellipse(impactEffect.x, impactEffect.y, ring.radius * 1.5);
+        }
+    }
+    
+    // Central flash (only at start)
+    if (impactEffect.time < 5) {
+        var flashAlpha = map(impactEffect.time, 0, 5, 200, 0);
+        fill(255, 255, 255, flashAlpha);
+        noStroke();
+        ellipse(impactEffect.x, impactEffect.y, ballDiameter * 1.5);
+    }
+    
+    pop();
+}
+
+
+// ------------------------------------------
+// POCKET ENTRY EFFECT
+// ------------------------------------------
+
+function checkPocketCollisions() {
+    var pocketRadius = pocketSize * 0.6;
+    
+    // Check cue ball
+    if (cueBall) {
+        for (var p = 0; p < pocketPositions.length; p++) {
+            var pocket = pocketPositions[p];
+            var dist = sqrt(pow(cueBall.position.x - pocket.x, 2) + 
+                           pow(cueBall.position.y - pocket.y, 2));
+            
+            if (dist < pocketRadius) {
+                // Cue ball potted - trigger animation and remove
+                triggerPocketAnimation(pocket.x, pocket.y, BALL_COLORS.cue);
+                World.remove(world, cueBall);
+                cueBall = null;
+                cueBallPlaced = false;
+                break;
+            }
+        }
+    }
+    
+    // Check red balls
+    for (var i = redBalls.length - 1; i >= 0; i--) {
+        var ball = redBalls[i];
+        for (var p = 0; p < pocketPositions.length; p++) {
+            var pocket = pocketPositions[p];
+            var dist = sqrt(pow(ball.position.x - pocket.x, 2) + 
+                           pow(ball.position.y - pocket.y, 2));
+            
+            if (dist < pocketRadius) {
+                // Ball potted
+                triggerPocketAnimation(pocket.x, pocket.y, BALL_COLORS.red);
+                World.remove(world, ball);
+                
+                // Clean up trail
+                delete ballTrails[ball.id];
+                
+                redBalls.splice(i, 1);
+                break;
+            }
+        }
+    }
+    
+    // Check coloured balls
+    for (var colour in colouredBalls) {
+        var ball = colouredBalls[colour];
+        if (!ball) continue;
+        
+        for (var p = 0; p < pocketPositions.length; p++) {
+            var pocket = pocketPositions[p];
+            var dist = sqrt(pow(ball.position.x - pocket.x, 2) + 
+                           pow(ball.position.y - pocket.y, 2));
+            
+            if (dist < pocketRadius) {
+                // Coloured ball potted - animate and re-spot
+                triggerPocketAnimation(pocket.x, pocket.y, BALL_COLORS[colour]);
+                
+                // Re-spot the coloured ball
+                var spotPos = spotPositions[colour];
+                Body.setPosition(ball, { x: spotPos.x, y: spotPos.y });
+                Body.setVelocity(ball, { x: 0, y: 0 });
+                break;
+            }
+        }
+    }
+}
+
+
+function triggerPocketAnimation(x, y, ballColor) {
+    pocketAnimations.push({
+        x: x,
+        y: y,
+        color: ballColor,
+        time: 0,
+        maxTime: 30,
+        size: ballDiameter,
+        particles: createPocketParticles(x, y, ballColor)
+    });
+}
+
+
+function createPocketParticles(x, y, ballColor) {
+    // Create particles for pocket entry effect
+    var particles = [];
+    var numParticles = 8;
+    
+    for (var i = 0; i < numParticles; i++) {
+        var angle = (TWO_PI / numParticles) * i + random(-0.2, 0.2);
+        var speed = random(1.5, 3);
+        
+        particles.push({
+            x: x,
+            y: y,
+            vx: cos(angle) * speed,
+            vy: sin(angle) * speed,
+            size: random(3, 6),
+            alpha: 255,
+            color: ballColor
+        });
+    }
+    
+    return particles;
+}
+
+
+function updatePocketAnimations() {
+    for (var i = pocketAnimations.length - 1; i >= 0; i--) {
+        var anim = pocketAnimations[i];
+        anim.time++;
+        
+        // Shrink the ball representation
+        anim.size *= 0.85;
+        
+        // Update particles
+        for (var j = 0; j < anim.particles.length; j++) {
+            var p = anim.particles[j];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.1;  // gravity
+            p.alpha *= 0.92;
+            p.size *= 0.97;
+        }
+        
+        // Remove finished animations
+        if (anim.time >= anim.maxTime) {
+            pocketAnimations.splice(i, 1);
+        }
+    }
+}
+
+
+function drawPocketAnimations() {
+    push();
+    noStroke();
+    
+    for (var i = 0; i < pocketAnimations.length; i++) {
+        var anim = pocketAnimations[i];
+        
+        // Draw shrinking ball
+        if (anim.size > 1) {
+            var alpha = map(anim.time, 0, anim.maxTime, 255, 0);
+            var c = color(anim.color);
+            c.setAlpha(alpha);
+            fill(c);
+            ellipse(anim.x, anim.y, anim.size);
+        }
+        
+        // Draw particles
+        for (var j = 0; j < anim.particles.length; j++) {
+            var p = anim.particles[j];
+            if (p.alpha > 5) {
+                var pc = color(p.color);
+                pc.setAlpha(p.alpha);
+                fill(pc);
+                ellipse(p.x, p.y, p.size);
+            }
+        }
+        
+        // Draw pocket glow
+        var glowAlpha = map(anim.time, 0, 15, 150, 0);
+        if (glowAlpha > 0) {
+            fill(255, 255, 200, glowAlpha);
+            ellipse(anim.x, anim.y, pocketSize * 1.3);
+        }
+    }
+    
+    pop();
 }
 
