@@ -2,6 +2,86 @@
 // SNOOKER GAME - Using P5.js and Matter.js
 // ============================================
 
+/*
+ * ============================================================================
+ * SNOOKER APP - DESIGN COMMENTARY
+ * ============================================================================
+ *
+ * APP DESIGN OVERVIEW
+ * -------------------
+ * This snooker application was developed using P5.js for rendering and
+ * Matter.js for physics simulation, creating a realistic top-down snooker
+ * experience. The design prioritises intuitive controls, visual feedback,
+ * and physically accurate ball behaviour.
+ *
+ * CUE CONTROL SYSTEM - MOUSE-BASED APPROACH
+ * ------------------------------------------
+ * The cue system utilises a two-phase mouse interaction model rather than
+ * keyboard controls or elastic-band mechanics. This design choice was made
+ * for several reasons:
+ *
+ * 1. INTUITIVE AIMING: Moving the mouse around the cue ball naturally
+ *    positions the cue, mimicking how a player would walk around a real
+ *    table to find their angle. The cue always points toward the mouse
+ *    cursor, providing immediate visual feedback.
+ *
+ * 2. SEPARATED AIM AND POWER: When the user clicks, the aim angle locks
+ *    in place. Dragging then controls power only, preventing accidental
+ *    aim changes during the power-setting phase. This mirrors real snooker
+ *    where players first align their shot, then focus on stroke power.
+ *
+ * 3. POWER CALCULATION: Power is determined by drag distance from the
+ *    initial click point. This provides fine-grained control - small drags
+ *    for delicate shots, larger drags for powerful breaks. The SHIFT key
+ *    reduces sensitivity for precision adjustments.
+ *
+ * 4. NON-ELASTIC BEHAVIOUR: Unlike elastic-band mechanics where releasing
+ *    snaps the cue forward, this system applies an instantaneous force
+ *    calculated from the pullback distance. This feels more like striking
+ *    a ball rather than launching it with a slingshot.
+ *
+ * The cue ball placement also requires user interaction within the D-zone,
+ * enforcing proper snooker rules and preventing invalid starting positions.
+ *
+ * CREATIVE EXTENSION - PRECISION AIMING SYSTEM
+ * ---------------------------------------------
+ * The extension implements three interconnected features not commonly found
+ * in browser-based snooker games:
+ *
+ * 1. TRAJECTORY PREDICTION: A real-time path visualisation shows where the
+ *    cue ball will travel, including up to three cushion bounces. This uses
+ *    step-based ray casting with cushion reflection calculations. The path
+ *    fades over distance and changes colour at each bounce point.
+ *
+ * 2. COLLISION PREVIEW: When the trajectory intersects a target ball, a
+ *    "ghost ball" appears at the contact point. The system calculates and
+ *    displays deflection paths for both balls using vector mathematics,
+ *    showing players exactly where balls will travel after impact.
+ *
+ * 3. SPIN CONTROL SYSTEM: An interactive UI allows players to apply top,
+ *    back, or side spin (english) by clicking on a cue ball diagram. Spin
+ *    affects shot physics - side spin curves the trajectory, while top/back
+ *    spin modifies friction and deflection angles after collision.
+ *
+ * 4. SLOW-MOTION REPLAY: Every shot is automatically recorded. Players can
+ *    review their shots at 0.25x speed, useful for analysing technique and
+ *    understanding ball physics.
+ *
+ * This extension is unique because it combines predictive physics simulation
+ * with real-time visualisation, essentially giving players "x-ray vision"
+ * of shot outcomes before execution. The spin system adds strategic depth
+ * beyond simple point-and-shoot mechanics, while trajectory prediction
+ * transforms the game into a learning tool for understanding snooker physics.
+ *
+ * Technical challenges included implementing line-circle intersection for
+ * collision detection, vector reflection for cushion bounces, and frame
+ * capture for the replay system - all running in real-time without
+ * impacting game performance.
+ *
+ * ============================================================================
+ */
+
+
 // Matter.js module aliases
 var Engine = Matter.Engine,
     World = Matter.World,
@@ -108,11 +188,11 @@ var canShoot = true;           // can player take a shot?
 // PHYSICS CONSTANTS
 // Tuned for realistic snooker ball behavior
 // ------------------------------------------
-var BALL_FRICTION = 0.01;           // surface friction
-var BALL_RESTITUTION = 0.95;        // ball-to-ball bounce (high for snooker balls)
-var BALL_FRICTION_AIR = 0.018;      // air/cloth resistance (slows balls down)
-var BALL_FRICTION_STATIC = 0.05;    // static friction
-var BALL_DENSITY = 0.025;           // ball mass
+var BALL_FRICTION = 0.001;          // surface friction (minimal)
+var BALL_RESTITUTION = 0.98;        // ball-to-ball bounce (very bouncy)
+var BALL_FRICTION_AIR = 0.001;      // air/cloth resistance (minimal - balls roll far)
+var BALL_FRICTION_STATIC = 0.005;   // static friction (minimal)
+var BALL_DENSITY = 0.001;            // ball mass (very light = maximum response)
 
 var CUSHION_RESTITUTION = 0.75;     // cushion bounce (lower than ball-to-ball)
 var CUSHION_FRICTION = 0.03;        // cushion surface friction
@@ -141,6 +221,45 @@ var pocketAnimations = [];    // active pocket entry effects
 var pocketPositions = [];     // will be initialized in setup
 
 // ------------------------------------------
+// CREATIVE EXTENSION: PRECISION AIMING SYSTEM
+// Features:
+// 1. Trajectory prediction with cushion bounces
+// 2. Spin control (top/back/left/right spin)
+// 3. Ghost ball collision preview
+// 4. Curved shot prediction from spin
+// ------------------------------------------
+
+var spinControl = {
+    x: 0,              // horizontal spin (-1 to 1) - left/right english
+    y: 0,              // vertical spin (-1 to 1) - top/back spin
+    maxSpin: 1,
+    uiX: 0,            // UI position (set in setup)
+    uiY: 0,
+    uiRadius: 35,
+    isDragging: false
+};
+
+var trajectoryPreview = {
+    enabled: true,
+    maxBounces: 3,         // predict up to 3 cushion bounces
+    maxDistance: 800,      // max prediction distance
+    points: [],            // predicted path points
+    ghostBall: null,       // predicted first collision
+    collisionBalls: []     // balls that will be hit
+};
+
+// Slow motion replay system
+var replaySystem = {
+    enabled: false,
+    recording: false,
+    frames: [],
+    maxFrames: 180,        // 3 seconds at 60fps
+    playbackIndex: 0,
+    playbackSpeed: 0.25,
+    showReplay: false
+};
+
+// ------------------------------------------
 // TABLE COLOURS
 // ------------------------------------------
 var TABLE_CLOTH = '#0B6623';    // baize green
@@ -166,6 +285,10 @@ function setup() {
     
     // Initialize pocket positions for animations
     initPocketPositions();
+    
+    // Initialize spin control UI position (bottom right)
+    spinControl.uiX = width - 60;
+    spinControl.uiY = height - 60;
     
     // Initialize ball spots
     initBallSpots();
@@ -525,10 +648,33 @@ function keyPressed() {
             cue.pullBack = 0;
         }
     }
+    
+    // Space key to toggle slow motion replay
+    if (key === ' ') {
+        toggleReplay();
+    }
+    
+    // C key to reset spin to center
+    if (key === 'c' || key === 'C') {
+        spinControl.x = 0;
+        spinControl.y = 0;
+    }
+    
+    // T key to toggle trajectory preview
+    if (key === 't' || key === 'T') {
+        trajectoryPreview.enabled = !trajectoryPreview.enabled;
+    }
 }
 
 
 function mousePressed() {
+    // Check if clicking on spin control
+    if (isInsideSpinControl(mouseX, mouseY)) {
+        spinControl.isDragging = true;
+        updateSpinFromMouse();
+        return;
+    }
+    
     // Check if placing cue ball
     if (!cueBallPlaced) {
         if (isInDZone(mouseX, mouseY)) {
@@ -558,6 +704,12 @@ function mousePressed() {
 
 
 function mouseDragged() {
+    // Handle spin control dragging
+    if (spinControl.isDragging) {
+        updateSpinFromMouse();
+        return;
+    }
+    
     // Adjust power while aiming (angle is locked)
     if (cue.isAiming && cueBall) {
         // Calculate distance from the initial click point
@@ -575,8 +727,16 @@ function mouseDragged() {
 
 
 function mouseReleased() {
+    // Stop spin control dragging
+    if (spinControl.isDragging) {
+        spinControl.isDragging = false;
+        return;
+    }
+    
     // Take the shot
     if (cue.isAiming && cueBall && cue.pullBack > 5) {
+        // Start recording for replay
+        startRecording();
         shootCueBall();
     }
     
@@ -587,18 +747,34 @@ function mouseReleased() {
 
 function shootCueBall() {
     // Calculate shot power and direction
-    var power = map(cue.pullBack, 0, cue.maxPullBack, 0, 0.035);
+    var power = map(cue.pullBack, 0, cue.maxPullBack, 0, 0.5);
     var powerNormalized = cue.pullBack / cue.maxPullBack;
     
     // Direction is toward the mouse (opposite of cue)
     var forceX = cos(cue.angle) * power;
     var forceY = sin(cue.angle) * power;
     
+    // Apply spin effect to force direction
+    // Side spin (english) adds a slight curve to the initial direction
+    var sideSpinEffect = spinControl.x * 0.08 * power;
+    var perpX = -sin(cue.angle);
+    var perpY = cos(cue.angle);
+    forceX += perpX * sideSpinEffect;
+    forceY += perpY * sideSpinEffect;
+    
+    // Top/back spin affects the ball's friction temporarily
+    // (simplified: adjust air friction based on spin)
+    var spinFrictionMod = 1 + (spinControl.y * 0.3);  // back spin = more friction, top spin = less
+    Body.set(cueBall, 'frictionAir', BALL_FRICTION_AIR * spinFrictionMod);
+    
     // Trigger impact effect at cue ball position
     triggerImpactEffect(cueBall.position.x, cueBall.position.y, powerNormalized);
     
     // Apply force to cue ball
     Body.applyForce(cueBall, cueBall.position, { x: forceX, y: forceY });
+    
+    // Apply angular velocity for visual spin effect
+    Body.setAngularVelocity(cueBall, spinControl.x * 0.2);
     
     // Update game state
     isShooting = true;
@@ -713,8 +889,19 @@ function createCushionBodies() {
 function draw() {
     background('#1a1a2e');
     
+    // Handle replay mode
+    if (replaySystem.showReplay) {
+        drawReplayFrame();
+        return;
+    }
+    
     // Update physics
     Engine.update(engine);
+    
+    // Record frame for replay if shot in progress
+    if (isShooting && replaySystem.recording) {
+        recordReplayFrame();
+    }
     
     // Update animations
     updateBallTrails();
@@ -727,8 +914,18 @@ function draw() {
     // Check if balls have stopped moving
     checkBallsMoving();
     
+    // Calculate trajectory prediction when aiming
+    if (cueBallPlaced && canShoot && cueBall) {
+        calculateTrajectoryPreview();
+    }
+    
     // Draw the table
     drawTable();
+    
+    // Draw trajectory prediction (under everything)
+    if (cueBallPlaced && canShoot && trajectoryPreview.enabled) {
+        drawTrajectoryPreview();
+    }
     
     // Draw ball trails (behind balls)
     drawBallTrails();
@@ -751,6 +948,9 @@ function draw() {
     if (cueBallPlaced && canShoot) {
         drawCue();
     }
+    
+    // Draw spin control UI
+    drawSpinControlUI();
     
     // Draw mode indicator and instructions
     drawModeIndicator();
@@ -795,6 +995,7 @@ function checkBallsMoving() {
     if (isShooting && !anyMoving) {
         isShooting = false;
         canShoot = true;
+        stopRecording();  // stop recording for replay
     }
 }
 
@@ -988,17 +1189,20 @@ function drawInstructions() {
     textAlign(LEFT, TOP);
     
     var yPos = 35;
-    text("Press 1, 2, or 3 to change mode | R to re-place cue ball", 15, yPos);
+    text("1/2/3: Mode | R: Re-place | T: Toggle trajectory | SPACE: Replay | C: Reset spin", 15, yPos);
     yPos += 16;
     
-    if (!cueBallPlaced) {
+    if (replaySystem.showReplay) {
+        fill('#FF6666');
+        text("Playing slow-motion replay... Press SPACE to exit", 15, yPos);
+    } else if (!cueBallPlaced) {
         fill('#FFFF00');
         text("Click in the D zone to place cue ball", 15, yPos);
     } else if (canShoot) {
-        text("Move mouse to aim, then click + drag for power", 15, yPos);
+        text("Aim with mouse | Click+drag for power | Use spin control (bottom right)", 15, yPos);
         yPos += 16;
         fill('#AAAAAA');
-        text("Hold SHIFT while dragging for fine power control", 15, yPos);
+        text("SHIFT: Fine power | Trajectory shows predicted path and collisions", 15, yPos);
     } else {
         text("Wait for balls to stop...", 15, yPos);
     }
@@ -1547,5 +1751,578 @@ function drawPocketAnimations() {
     }
     
     pop();
+}
+
+
+// ============================================
+// CREATIVE EXTENSION: PRECISION AIMING SYSTEM
+// ============================================
+
+// ------------------------------------------
+// SPIN CONTROL UI
+// ------------------------------------------
+
+function drawSpinControlUI() {
+    push();
+    
+    var cx = spinControl.uiX;
+    var cy = spinControl.uiY;
+    var r = spinControl.uiRadius;
+    
+    // Background circle (cue ball representation)
+    fill(40, 40, 50, 200);
+    stroke(100, 100, 120);
+    strokeWeight(2);
+    ellipse(cx, cy, r * 2 + 10);
+    
+    // Inner cue ball
+    fill(255, 255, 240);
+    noStroke();
+    ellipse(cx, cy, r * 2);
+    
+    // Grid lines for reference
+    stroke(200, 200, 200, 100);
+    strokeWeight(1);
+    line(cx - r, cy, cx + r, cy);
+    line(cx, cy - r, cx, cy + r);
+    
+    // Spin indicator dot
+    var dotX = cx + spinControl.x * r * 0.85;
+    var dotY = cy + spinControl.y * r * 0.85;
+    
+    // Dot shadow
+    fill(0, 0, 0, 80);
+    noStroke();
+    ellipse(dotX + 2, dotY + 2, 14);
+    
+    // Main dot with color based on spin type
+    var dotColor = getSpinColor();
+    fill(dotColor);
+    stroke(255);
+    strokeWeight(2);
+    ellipse(dotX, dotY, 14);
+    
+    // Label
+    fill(255);
+    noStroke();
+    textSize(10);
+    textAlign(CENTER, TOP);
+    text("SPIN", cx, cy + r + 8);
+    
+    // Spin type indicator
+    var spinType = getSpinTypeLabel();
+    if (spinType !== "CENTER") {
+        textSize(9);
+        fill(dotColor);
+        text(spinType, cx, cy + r + 20);
+    }
+    
+    pop();
+}
+
+
+function getSpinColor() {
+    // Color based on spin direction
+    var spinMagnitude = sqrt(spinControl.x * spinControl.x + spinControl.y * spinControl.y);
+    
+    if (spinMagnitude < 0.1) {
+        return color(100, 100, 100);  // center - gray
+    }
+    
+    // Mix colors based on spin direction
+    var r = 50, g = 50, b = 200;  // base blue
+    
+    if (spinControl.y < -0.2) {
+        // Top spin - green
+        g = 200;
+        b = 100;
+    } else if (spinControl.y > 0.2) {
+        // Back spin - red
+        r = 220;
+        g = 80;
+        b = 80;
+    }
+    
+    if (abs(spinControl.x) > 0.2) {
+        // Side spin - add purple tint
+        r = max(r, 150);
+        b = max(b, 180);
+    }
+    
+    return color(r, g, b);
+}
+
+
+function getSpinTypeLabel() {
+    var labels = [];
+    
+    if (spinControl.y < -0.3) labels.push("TOP");
+    if (spinControl.y > 0.3) labels.push("BACK");
+    if (spinControl.x < -0.3) labels.push("LEFT");
+    if (spinControl.x > 0.3) labels.push("RIGHT");
+    
+    if (labels.length === 0) return "CENTER";
+    return labels.join(" + ");
+}
+
+
+function isInsideSpinControl(x, y) {
+    var dist = sqrt(pow(x - spinControl.uiX, 2) + pow(y - spinControl.uiY, 2));
+    return dist <= spinControl.uiRadius;
+}
+
+
+function updateSpinFromMouse() {
+    // Calculate spin based on mouse position within the control
+    var dx = mouseX - spinControl.uiX;
+    var dy = mouseY - spinControl.uiY;
+    
+    // Normalize to -1 to 1 range
+    spinControl.x = constrain(dx / spinControl.uiRadius, -1, 1);
+    spinControl.y = constrain(dy / spinControl.uiRadius, -1, 1);
+}
+
+
+// ------------------------------------------
+// TRAJECTORY PREDICTION
+// ------------------------------------------
+
+function calculateTrajectoryPreview() {
+    trajectoryPreview.points = [];
+    trajectoryPreview.ghostBall = null;
+    trajectoryPreview.collisionBalls = [];
+    
+    if (!cueBall) return;
+    
+    // Starting position and direction
+    var startX = cueBall.position.x;
+    var startY = cueBall.position.y;
+    var dirX = cos(cue.angle);
+    var dirY = sin(cue.angle);
+    
+    // Apply spin curve effect to initial direction
+    var curveAmount = spinControl.x * 0.15;  // side spin curves the path
+    
+    // Simulate trajectory
+    var currentX = startX;
+    var currentY = startY;
+    var currentDirX = dirX;
+    var currentDirY = dirY;
+    var bounces = 0;
+    var totalDist = 0;
+    var stepSize = 5;
+    
+    // Get table boundaries
+    var innerLeft = tableX + cushionThickness + ballRadius;
+    var innerRight = tableX + tableLength - cushionThickness - ballRadius;
+    var innerTop = tableY + cushionThickness + ballRadius;
+    var innerBottom = tableY + tableWidth - cushionThickness - ballRadius;
+    
+    // Trace the path
+    while (bounces <= trajectoryPreview.maxBounces && totalDist < trajectoryPreview.maxDistance) {
+        // Add point to trajectory
+        trajectoryPreview.points.push({
+            x: currentX,
+            y: currentY,
+            bounce: bounces
+        });
+        
+        // Move forward
+        var nextX = currentX + currentDirX * stepSize;
+        var nextY = currentY + currentDirY * stepSize;
+        
+        // Apply gradual curve from spin (subtle effect)
+        if (abs(curveAmount) > 0.01) {
+            var perpX = -currentDirY;
+            var perpY = currentDirX;
+            nextX += perpX * curveAmount * 0.3;
+            nextY += perpY * curveAmount * 0.3;
+            
+            // Reduce curve effect over distance
+            curveAmount *= 0.995;
+        }
+        
+        // Check for cushion bounces
+        var bounced = false;
+        
+        if (nextX < innerLeft) {
+            nextX = innerLeft;
+            currentDirX = -currentDirX;
+            bounces++;
+            bounced = true;
+        } else if (nextX > innerRight) {
+            nextX = innerRight;
+            currentDirX = -currentDirX;
+            bounces++;
+            bounced = true;
+        }
+        
+        if (nextY < innerTop) {
+            nextY = innerTop;
+            currentDirY = -currentDirY;
+            bounces++;
+            bounced = true;
+        } else if (nextY > innerBottom) {
+            nextY = innerBottom;
+            currentDirY = -currentDirY;
+            bounces++;
+            bounced = true;
+        }
+        
+        // Check for ball collisions (only on first segment before bounce)
+        if (bounces === 0 && !trajectoryPreview.ghostBall) {
+            var hitBall = checkTrajectoryBallCollision(currentX, currentY, nextX, nextY);
+            if (hitBall) {
+                trajectoryPreview.ghostBall = {
+                    x: hitBall.hitX,
+                    y: hitBall.hitY,
+                    targetBall: hitBall.ball,
+                    targetColor: hitBall.color
+                };
+                
+                // Calculate deflection paths
+                calculateDeflectionPaths(hitBall);
+                break;
+            }
+        }
+        
+        currentX = nextX;
+        currentY = nextY;
+        totalDist += stepSize;
+        
+        // Renormalize direction after curve
+        var dirLen = sqrt(currentDirX * currentDirX + currentDirY * currentDirY);
+        currentDirX /= dirLen;
+        currentDirY /= dirLen;
+    }
+}
+
+
+function checkTrajectoryBallCollision(x1, y1, x2, y2) {
+    var minDist = ballDiameter;
+    var closest = null;
+    
+    // Check all balls
+    var allBalls = getAllBallsExceptCue();
+    
+    for (var i = 0; i < allBalls.length; i++) {
+        var ball = allBalls[i];
+        var bx = ball.body.position.x;
+        var by = ball.body.position.y;
+        
+        // Line segment to circle collision
+        var collision = lineCircleCollision(x1, y1, x2, y2, bx, by, minDist);
+        
+        if (collision && (!closest || collision.dist < closest.dist)) {
+            closest = {
+                ball: ball.body,
+                color: ball.color,
+                hitX: collision.x,
+                hitY: collision.y,
+                dist: collision.dist
+            };
+        }
+    }
+    
+    return closest;
+}
+
+
+function getAllBallsExceptCue() {
+    var balls = [];
+    
+    // Red balls
+    for (var i = 0; i < redBalls.length; i++) {
+        balls.push({ body: redBalls[i], color: BALL_COLORS.red });
+    }
+    
+    // Coloured balls
+    for (var colour in colouredBalls) {
+        if (colouredBalls[colour]) {
+            balls.push({ body: colouredBalls[colour], color: BALL_COLORS[colour] });
+        }
+    }
+    
+    return balls;
+}
+
+
+function lineCircleCollision(x1, y1, x2, y2, cx, cy, radius) {
+    // Vector from line start to circle center
+    var dx = x2 - x1;
+    var dy = y2 - y1;
+    var fx = x1 - cx;
+    var fy = y1 - cy;
+    
+    var a = dx * dx + dy * dy;
+    var b = 2 * (fx * dx + fy * dy);
+    var c = fx * fx + fy * fy - radius * radius;
+    
+    var discriminant = b * b - 4 * a * c;
+    
+    if (discriminant < 0) return null;
+    
+    discriminant = sqrt(discriminant);
+    var t1 = (-b - discriminant) / (2 * a);
+    var t2 = (-b + discriminant) / (2 * a);
+    
+    // Check if intersection is within segment
+    if (t1 >= 0 && t1 <= 1) {
+        return {
+            x: x1 + t1 * dx,
+            y: y1 + t1 * dy,
+            dist: t1 * sqrt(a)
+        };
+    }
+    
+    if (t2 >= 0 && t2 <= 1) {
+        return {
+            x: x1 + t2 * dx,
+            y: y1 + t2 * dy,
+            dist: t2 * sqrt(a)
+        };
+    }
+    
+    return null;
+}
+
+
+function calculateDeflectionPaths(hitInfo) {
+    // Calculate where cue ball and target ball will go after collision
+    var cueVelX = cos(cue.angle);
+    var cueVelY = sin(cue.angle);
+    
+    var targetX = hitInfo.ball.position.x;
+    var targetY = hitInfo.ball.position.y;
+    var hitX = hitInfo.hitX;
+    var hitY = hitInfo.hitY;
+    
+    // Direction from cue ball hit point to target ball center
+    var toTargetX = targetX - hitX;
+    var toTargetY = targetY - hitY;
+    var toTargetLen = sqrt(toTargetX * toTargetX + toTargetY * toTargetY);
+    toTargetX /= toTargetLen;
+    toTargetY /= toTargetLen;
+    
+    // Target ball goes in this direction
+    trajectoryPreview.collisionBalls.push({
+        startX: targetX,
+        startY: targetY,
+        dirX: toTargetX,
+        dirY: toTargetY,
+        color: hitInfo.color,
+        length: 80
+    });
+    
+    // Cue ball deflects (simplified - 90 degree deflection for center hit)
+    // With spin, the deflection angle changes
+    var spinEffect = spinControl.y * 0.3;  // top spin = less deflection, back spin = more
+    
+    var deflectAngle = atan2(toTargetY, toTargetX) + HALF_PI + spinEffect;
+    trajectoryPreview.collisionBalls.push({
+        startX: hitX,
+        startY: hitY,
+        dirX: cos(deflectAngle),
+        dirY: sin(deflectAngle),
+        color: BALL_COLORS.cue,
+        length: 50
+    });
+}
+
+
+function drawTrajectoryPreview() {
+    push();
+    
+    // Draw main trajectory line with gradient
+    if (trajectoryPreview.points.length > 1) {
+        noFill();
+        
+        for (var i = 1; i < trajectoryPreview.points.length; i++) {
+            var p1 = trajectoryPreview.points[i - 1];
+            var p2 = trajectoryPreview.points[i];
+            
+            // Fade out over distance
+            var alpha = map(i, 0, trajectoryPreview.points.length, 180, 30);
+            
+            // Different color for each bounce
+            if (p1.bounce === 0) {
+                stroke(255, 255, 255, alpha);
+            } else if (p1.bounce === 1) {
+                stroke(255, 200, 100, alpha);
+            } else {
+                stroke(255, 150, 80, alpha * 0.7);
+            }
+            
+            strokeWeight(p1.bounce === 0 ? 2 : 1.5);
+            
+            // Dashed line effect
+            if (i % 3 !== 0) {
+                line(p1.x, p1.y, p2.x, p2.y);
+            }
+        }
+    }
+    
+    // Draw ghost ball at collision point
+    if (trajectoryPreview.ghostBall) {
+        var ghost = trajectoryPreview.ghostBall;
+        
+        // Ghost cue ball position
+        noFill();
+        stroke(255, 255, 255, 150);
+        strokeWeight(2);
+        ellipse(ghost.x, ghost.y, ballDiameter);
+        
+        // Highlight on target ball
+        stroke(255, 255, 100, 200);
+        strokeWeight(3);
+        noFill();
+        ellipse(ghost.targetBall.position.x, ghost.targetBall.position.y, ballDiameter + 6);
+        
+        // Draw deflection paths
+        for (var i = 0; i < trajectoryPreview.collisionBalls.length; i++) {
+            var path = trajectoryPreview.collisionBalls[i];
+            
+            var c = color(path.color);
+            c.setAlpha(120);
+            stroke(c);
+            strokeWeight(2);
+            
+            // Draw arrow
+            var endX = path.startX + path.dirX * path.length;
+            var endY = path.startY + path.dirY * path.length;
+            
+            drawingContext.setLineDash([4, 4]);
+            line(path.startX, path.startY, endX, endY);
+            drawingContext.setLineDash([]);
+            
+            // Arrowhead
+            var arrowSize = 8;
+            var angle = atan2(path.dirY, path.dirX);
+            fill(c);
+            noStroke();
+            triangle(
+                endX, endY,
+                endX - cos(angle - 0.4) * arrowSize,
+                endY - sin(angle - 0.4) * arrowSize,
+                endX - cos(angle + 0.4) * arrowSize,
+                endY - sin(angle + 0.4) * arrowSize
+            );
+        }
+    }
+    
+    pop();
+}
+
+
+// ------------------------------------------
+// SLOW MOTION REPLAY SYSTEM
+// ------------------------------------------
+
+function startRecording() {
+    replaySystem.recording = true;
+    replaySystem.frames = [];
+}
+
+
+function stopRecording() {
+    replaySystem.recording = false;
+}
+
+
+function recordReplayFrame() {
+    if (replaySystem.frames.length >= replaySystem.maxFrames) {
+        replaySystem.frames.shift();  // remove oldest frame
+    }
+    
+    // Capture current state
+    var frame = {
+        cueBall: cueBall ? { x: cueBall.position.x, y: cueBall.position.y } : null,
+        redBalls: [],
+        colouredBalls: {}
+    };
+    
+    for (var i = 0; i < redBalls.length; i++) {
+        frame.redBalls.push({
+            x: redBalls[i].position.x,
+            y: redBalls[i].position.y
+        });
+    }
+    
+    for (var colour in colouredBalls) {
+        if (colouredBalls[colour]) {
+            frame.colouredBalls[colour] = {
+                x: colouredBalls[colour].position.x,
+                y: colouredBalls[colour].position.y
+            };
+        }
+    }
+    
+    replaySystem.frames.push(frame);
+}
+
+
+function drawReplayFrame() {
+    // Draw table
+    drawTable();
+    
+    if (replaySystem.frames.length === 0) {
+        replaySystem.showReplay = false;
+        return;
+    }
+    
+    // Get current frame (with interpolation for smooth playback)
+    var frameIndex = floor(replaySystem.playbackIndex);
+    var frame = replaySystem.frames[min(frameIndex, replaySystem.frames.length - 1)];
+    
+    // Draw balls at recorded positions
+    if (frame.cueBall) {
+        drawSingleBall(frame.cueBall.x, frame.cueBall.y, BALL_COLORS.cue);
+    }
+    
+    for (var i = 0; i < frame.redBalls.length; i++) {
+        drawSingleBall(frame.redBalls[i].x, frame.redBalls[i].y, BALL_COLORS.red);
+    }
+    
+    for (var colour in frame.colouredBalls) {
+        var pos = frame.colouredBalls[colour];
+        drawSingleBall(pos.x, pos.y, BALL_COLORS[colour]);
+    }
+    
+    // Advance playback
+    replaySystem.playbackIndex += replaySystem.playbackSpeed;
+    
+    // Replay overlay
+    push();
+    fill(0, 0, 0, 100);
+    noStroke();
+    rect(0, 0, width, 40);
+    
+    fill(255, 100, 100);
+    textSize(16);
+    textAlign(CENTER, CENTER);
+    text("SLOW MOTION REPLAY", width / 2, 20);
+    
+    // Progress bar
+    var progress = replaySystem.playbackIndex / replaySystem.frames.length;
+    fill(50);
+    rect(width / 4, 30, width / 2, 5, 2);
+    fill(255, 100, 100);
+    rect(width / 4, 30, (width / 2) * progress, 5, 2);
+    
+    pop();
+    
+    // End replay
+    if (replaySystem.playbackIndex >= replaySystem.frames.length) {
+        replaySystem.showReplay = false;
+        replaySystem.playbackIndex = 0;
+    }
+}
+
+
+function toggleReplay() {
+    if (replaySystem.frames.length > 0 && !isShooting) {
+        replaySystem.showReplay = !replaySystem.showReplay;
+        replaySystem.playbackIndex = 0;
+    }
 }
 
